@@ -1,31 +1,7 @@
 """
 pipeline/bert/bert_client.py
 Sorumlu: Burcu
-
-Görev:
-  Bugün scraper'ın çektiği haberleri Hugging Face Spaces'teki
-  BERT servisine gönder, duygu skoru al, articles tablosunu güncelle.
-
-Çalışma sırası:
-  pipeline/run.py tarafından process.py'dan sonra çağrılır.
-
-Girdi:
-  Supabase articles tablosu — sentiment_bert IS NULL olan bugünün kayıtları
-
-Çıktı:
-  articles tablosu güncellenir:
-    - sentiment_bert        : str    ('pozitif', 'negatif', 'nötr')
-    - sentiment_score_bert  : float  (-1.0 ile 1.0 arası)
-
-BERT Servisi:
-  Burcu'nun Hugging Face Spaces'te açacağı FastAPI servisi.
-  Endpoint: POST /predict
-  Request:  {"text": "haber metni..."}
-  Response: {"sentiment": "pozitif", "score": 0.87}
-
-  Servis hazır olunca BERT_SERVICE_URL'i .env'e ekle.
 """
-
 import os
 import logging
 import httpx
@@ -38,11 +14,9 @@ logger = logging.getLogger(__name__)
 
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
-BERT_SERVICE_URL = os.getenv("BERT_SERVICE_URL")  # örn: https://burcu-bert.hf.space
-
+BERT_SERVICE_URL = "https://burcuduzen-turkish-financial-bert-api.hf.space"
 
 def get_todays_unscored(client):
-    """Bugün çekilmiş, henüz BERT skorlanmamış haberleri getir"""
     today = datetime.now(timezone.utc).date().isoformat()
     result = (
         client.table("articles")
@@ -53,41 +27,59 @@ def get_todays_unscored(client):
     )
     return result.data
 
-
 def predict_sentiment(text: str) -> dict:
-    """
-    TODO (Burcu): HF Spaces BERT servisine istek at.
+    try:
+        response = httpx.post(
+            f"{BERT_SERVICE_URL}/predict",
+            json={"text": text},
+            timeout=30
+        )
+        response.raise_for_status()
+        data = response.json()
 
-    Dönüş: {"sentiment": "pozitif", "score": 0.87}
+        sentiment_map = {
+            "positive": "pozitif",
+            "negative": "negatif",
+            "neutral": "nötr"
+        }
+        sentiment = sentiment_map.get(data["sentiment"], "nötr")
 
-    Not: Servis URL'i .env'deki BERT_SERVICE_URL değişkeninden okunur.
-    """
-    # TODO: httpx.post(f"{BERT_SERVICE_URL}/predict", json={"text": text})
-    # TODO: Hata durumunda {"sentiment": "nötr", "score": 0.0} döndür
-    raise NotImplementedError("Burcu implement edecek — önce HF Spaces servisi hazır olmalı")
+        if sentiment == "pozitif":
+            score = data["score"]
+        elif sentiment == "negatif":
+            score = -data["score"]
+        else:
+            score = 0.0
 
+        return {"sentiment": sentiment, "score": round(score, 4)}
+    except Exception as e:
+        logger.error(f"BERT servis hatasi: {e}")
+        return {"sentiment": "nötr", "score": 0.0}
 
 def run_bert_scoring():
-    """
-    Ana fonksiyon — pipeline/run.py bu fonksiyonu çağırır.
-    TODO (Burcu): Haberleri al, her biri için predict_sentiment çağır,
-    sonuçları Supabase'e yaz.
-    """
     if not BERT_SERVICE_URL:
-        logger.warning("BERT_SERVICE_URL tanımlı değil, adım atlanıyor.")
+        logger.warning("BERT_SERVICE_URL tanimli degil, adim atlaniyor.")
         return
 
     client = create_client(SUPABASE_URL, SUPABASE_KEY)
     articles = get_todays_unscored(client)
-    logger.info(f"{len(articles)} haber BERT'e gönderilecek")
+    logger.info(f"{len(articles)} haber BERT'e gonderilecek")
 
-    # TODO: Her makale için predict_sentiment çağır
-    # TODO: articles tablosunu güncelle:
-    # client.table("articles").update({
-    #     "sentiment_bert": result["sentiment"],
-    #     "sentiment_score_bert": result["score"]
-    # }).eq("id", article["id"]).execute()
+    for article in articles:
+        text = article.get("summary") or article.get("title") or ""
+        if not text:
+            continue
 
+        result = predict_sentiment(text)
+
+        client.table("articles").update({
+            "sentiment_bert": result["sentiment"],
+            "sentiment_score_bert": result["score"]
+        }).eq("id", article["id"]).execute()
+
+        logger.info(f"[{article['id']}] {result['sentiment']} ({result['score']})")
+
+    logger.info("BERT skorlama tamamlandi")
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)

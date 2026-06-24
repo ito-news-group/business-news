@@ -1,0 +1,25 @@
+FROM python:3.11-slim
+
+# Playwright sistem bağımlılıkları
+RUN apt-get update && apt-get install -y \
+    cron \
+    curl \
+    wget \
+    gnupg \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+COPY scraper/requirements.txt ./scraper-requirements.txt
+RUN pip install --no-cache-dir -r scraper-requirements.txt
+RUN playwright install chromium
+RUN playwright install-deps chromium
+
+COPY scraper/ ./scraper/
+COPY pipeline/ ./pipeline/
+COPY .env.example .env.example
+
+# Cron job: her gün 06:30'da pipeline çalışır
+RUN echo "30 6 * * * cd /app && python -m pipeline.run >> /app/logs/pipeline.log 2>&1" | crontab -
+
+CMD ["cron", "-f"]

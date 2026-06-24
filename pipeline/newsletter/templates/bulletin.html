@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+  <meta charset="UTF-8">
+  <title>İTO Haber Bülteni — {{ date }}</title>
+</head>
+<body style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
+
+  <!-- TODO (Tolunay): Bu şablonu tasarla, aşağısı sadece iskelet -->
+
+  <h1 style="color: #1E3A5F;">İTO Haber Bülteni</h1>
+  <p style="color: #666;">{{ date }}</p>
+
+  <hr>
+
+  {% for s in summaries %}
+  <div style="margin-bottom: 30px;">
+    <h2 style="color: #2E75B6;">{{ s.sector | upper }}</h2>
+    <p><strong>{{ s.headline }}</strong></p>
+    <ul>
+      {% for point in s.bullet_points %}
+      <li>{{ point }}</li>
+      {% endfor %}
+    </ul>
+  </div>
+  {% endfor %}
+
+  <hr>
+  <p style="color: #999; font-size: 12px;">
+    Bu bültene abone oldunuz. 
+    <a href="#">Aboneliği iptal et</a>
+  </p>
+
+</body>
+</html>

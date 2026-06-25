@@ -1,120 +1,243 @@
 """
 pipeline/gpt/daily_sector_summary.py
-Sorumlu: Esad
+Sorumlu: Esad Ay
 
 Görev:
   process.py bittikten sonra çalışır.
   Bugünün haberlerini sektöre göre gruplar.
-  Her sektör için GPT-4o-mini ile "bugün bu sektörde ne oldu" özeti üretir.
+  Her sektör için GPT-4o-mini ile günlük sektör özeti üretir.
   daily_summaries tablosuna yazar.
-
-Çalışma sırası:
-  pipeline/run.py tarafından process.py'dan SONRA çağrılır.
-  (Sektör bilgisi hazır olmadan çalışamaz)
-
-Girdi:
-  Supabase articles tablosu — bugünün sector dolu kayıtları
-
-Çıktı:
-  daily_summaries tablosuna INSERT:
-    - sector        : str
-    - summary_date  : date
-    - bullet_points : list[str]   ['• Madde 1', '• Madde 2', '• Madde 3']
-    - headline      : str         en önemli gelişme tek cümle
-    - article_count : int
-    - avg_sentiment : float       (BERT skorlarının ortalaması, sonradan doldurulabilir)
 """
 
-import os
+import json
 import logging
+import os
 from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
 from dotenv import load_dotenv
+from openai import OpenAI
 from supabase import create_client
 
-load_dotenv()
+ROOT_DIR = Path(__file__).resolve().parents[2]
+load_dotenv(ROOT_DIR / ".env")
+
 logger = logging.getLogger(__name__)
 
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 
-# TODO (Esad): Bu prompt'u geliştir
-SECTOR_SUMMARY_PROMPT = """
-Aşağıdaki {sector} sektörüne ait bugünkü haberleri analiz et:
+SYSTEM_PROMPT = """
+Sen İstanbul Ticaret Gazetesi için günlük sektör özeti yazan Türkçe ekonomi editörüsün.
 
-1. En önemli 3 gelişmeyi bullet point olarak yaz (her biri "• " ile başlasın)
-2. Günün en kritik gelişmesini tek cümleyle özetle (headline)
+Görevin:
+Aynı sektördeki bugünkü haberleri okuyup günlük sektör özeti üretmek.
 
-Haberler:
-{articles_text}
+Kurallar:
+- Sadece JSON döndür.
+- bullet_points tam 3 madde olmalı.
+- Her madde "• " ile başlamalı.
+- headline tek cümle olmalı.
+- Gereksiz süslü dil kullanma.
+- Haberde olmayan bilgi ekleme.
+- Sentiment / duygu analizi yapma.
 
-Sadece JSON döndür:
-{{"bullet_points": ["• ...", "• ...", "• ..."], "headline": "..."}}
+JSON formatı:
+{
+  "bullet_points": ["• Madde 1", "• Madde 2", "• Madde 3"],
+  "headline": "Günün en önemli gelişmesi tek cümle."
+}
 """
 
 
-def get_todays_articles_by_sector(client) -> dict:
-    """
-    Bugünün haberlerini sektöre göre grupla.
-    Dönüş: {"finans": [...], "insaat": [...], ...}
-    """
+def validate_env() -> None:
+    missing = []
+    if not SUPABASE_URL:
+        missing.append("SUPABASE_URL")
+    if not SUPABASE_KEY:
+        missing.append("SUPABASE_KEY")
+    if not OPENAI_API_KEY:
+        missing.append("OPENAI_API_KEY")
+
+    if missing:
+        raise RuntimeError(f"Eksik env değişkenleri: {', '.join(missing)}")
+
+
+def get_clients():
+    validate_env()
+    supabase_client = create_client(SUPABASE_URL, SUPABASE_KEY)
+    openai_client = OpenAI(api_key=OPENAI_API_KEY)
+    return supabase_client, openai_client
+
+
+def get_todays_articles_by_sector(client) -> dict[str, list[dict[str, Any]]]:
+    """Bugünün haberlerini sektöre göre grupla."""
     today = datetime.now(timezone.utc).date().isoformat()
+
     result = (
         client.table("articles")
-        .select("id, title, summary, sector, sentiment_score_bert")
+        .select("id, title, summary, sector, sentiment_score_bert, scraped_at")
         .not_.is_("sector", "null")
         .gte("scraped_at", today)
         .execute()
     )
 
-    grouped = {}
-    for article in result.data:
-        sector = article["sector"]
-        if sector not in grouped:
-            grouped[sector] = []
-        grouped[sector].append(article)
+    grouped: dict[str, list[dict[str, Any]]] = {}
+
+    for article in result.data or []:
+        sector = article.get("sector") or "diger"
+        grouped.setdefault(sector, []).append(article)
 
     return grouped
 
 
-def summarize_sector(sector: str, articles: list, openai_client) -> dict:
-    """
-    TODO (Esad): Bir sektörün haberlerini özetle.
+def _safe_json_loads(text: str) -> dict[str, Any]:
+    text = text.strip()
 
+    if text.startswith("```"):
+        text = text.replace("```json", "").replace("```", "").strip()
+
+    start = text.find("{")
+    end = text.rfind("}")
+
+    if start != -1 and end != -1:
+        text = text[start:end + 1]
+
+    return json.loads(text)
+
+
+def _normalize_bullets(value: Any) -> list[str]:
+    if isinstance(value, list):
+        items = [str(item).strip().lstrip("•").strip() for item in value]
+    else:
+        raw = str(value or "")
+        items = [
+            line.strip().lstrip("•").strip()
+            for line in raw.splitlines()
+            if line.strip()
+        ]
+
+    items = [item for item in items if item]
+
+    if len(items) < 3:
+        items = (items + ["Sektörde gün içindeki gelişmeler takip edildi."] * 3)[:3]
+    else:
+        items = items[:3]
+
+    return [f"• {item}" for item in items]
+
+
+def _calculate_avg_sentiment(articles: list[dict[str, Any]]) -> float | None:
+    scores = [
+        article.get("sentiment_score_bert")
+        for article in articles
+        if article.get("sentiment_score_bert") is not None
+    ]
+
+    if not scores:
+        return None
+
+    return sum(float(score) for score in scores) / len(scores)
+
+
+def summarize_sector(sector: str, articles: list[dict[str, Any]], openai_client: OpenAI) -> dict[str, Any]:
+    """
+    Bir sektörün günlük özetini üretir.
     Dönüş:
-    {
+      {
         "bullet_points": ["• ...", "• ...", "• ..."],
         "headline": "...",
         "article_count": 5,
-        "avg_sentiment": 0.2
+        "avg_sentiment": None
+      }
+    """
+    article_lines = []
+
+    for article in articles:
+        title = article.get("title") or "Başlıksız"
+        summary = article.get("summary") or ""
+        article_lines.append(f"- Başlık: {title}\n  Özet: {summary}")
+
+    articles_text = "\n\n".join(article_lines)[:16000]
+
+    user_prompt = f"""
+Sektör:
+{sector}
+
+Bugünkü haberler:
+{articles_text}
+"""
+
+    try:
+        response = openai_client.chat.completions.create(
+            model=OPENAI_MODEL,
+            messages=[
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": user_prompt},
+            ],
+            response_format={"type": "json_object"},
+            temperature=0.2,
+        )
+
+        content = response.choices[0].message.content or "{}"
+        data = _safe_json_loads(content)
+
+        bullet_points = _normalize_bullets(data.get("bullet_points", []))
+        headline = str(data.get("headline") or bullet_points[0].lstrip("•").strip()).strip()
+
+    except Exception as exc:
+        logger.exception("Günlük sektör özeti hatası. sector=%s error=%s", sector, exc)
+        bullet_points = _normalize_bullets([article.get("title", "") for article in articles[:3]])
+        headline = bullet_points[0].lstrip("•").strip() if bullet_points else "Sektördeki gelişmeler takip edildi."
+
+    return {
+        "bullet_points": bullet_points,
+        "headline": headline,
+        "article_count": len(articles),
+        "avg_sentiment": _calculate_avg_sentiment(articles),
     }
-    """
-    # TODO: Haber başlıklarını + özetlerini birleştir
-    # TODO: GPT-4o-mini'ye gönder
-    # TODO: JSON parse et
-    # TODO: avg_sentiment = sentiment_score_bert ortalaması (None olanları atla)
-    raise NotImplementedError("Esad implement edecek")
 
 
-def run_daily_sector_summary():
+def run_daily_sector_summary() -> int:
     """
-    Ana fonksiyon — pipeline/run.py bu fonksiyonu çağırır.
-    TODO (Esad): Her sektör için summarize_sector çağır,
-    sonuçları daily_summaries tablosuna yaz.
+    Pipeline ana fonksiyonu.
+    Bugünkü haberleri sektöre göre gruplar,
+    her sektör için günlük özet üretir,
+    daily_summaries tablosuna upsert eder.
     """
-    # TODO: Supabase + OpenAI client oluştur
-    # TODO: get_todays_articles_by_sector ile gruplu haberleri al
-    # TODO: Her sektör için summarize_sector çağır
-    # Örnek INSERT:
-    # client.table("daily_summaries").upsert({
-    #     "sector": sector,
-    #     "summary_date": today,
-    #     "bullet_points": result["bullet_points"],
-    #     "headline": result["headline"],
-    #     "article_count": result["article_count"],
-    #     "avg_sentiment": result["avg_sentiment"],
-    # }, on_conflict="sector,summary_date").execute()
-    raise NotImplementedError("Esad implement edecek")
+    supabase_client, openai_client = get_clients()
+    today = datetime.now(timezone.utc).date().isoformat()
+
+    grouped = get_todays_articles_by_sector(supabase_client)
+    logger.info("%s sektör için günlük özet üretilecek.", len(grouped))
+
+    processed_count = 0
+
+    for sector, articles in grouped.items():
+        if not articles:
+            continue
+
+        logger.info("Sektör özeti üretiliyor: sector=%s article_count=%s", sector, len(articles))
+
+        result = summarize_sector(sector, articles, openai_client)
+
+        supabase_client.table("daily_summaries").upsert({
+            "sector": sector,
+            "summary_date": today,
+            "bullet_points": result["bullet_points"],
+            "headline": result["headline"],
+            "article_count": result["article_count"],
+            "avg_sentiment": result["avg_sentiment"],
+        }, on_conflict="sector,summary_date").execute()
+
+        processed_count += 1
+        logger.info("OK: sector=%s", sector)
+
+    logger.info("Günlük sektör özeti tamamlandı. İşlenen sektör: %s", processed_count)
+    return processed_count
 
 
 if __name__ == "__main__":

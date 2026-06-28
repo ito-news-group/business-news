@@ -3,20 +3,22 @@ FastAPI Ana Uygulama
 Tüm endpoint'leri barındırır.
 """
 
+import logging
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 
 from api.routers import articles, summaries, sectors, rag, newsletter, health
 
+logger = logging.getLogger(__name__)
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Uygulama başlarken
-    print("API başlatılıyor...")
+    logger.info("API başlatılıyor")
     yield
-    # Uygulama kapanırken
-    print("API kapatılıyor...")
+    logger.info("API kapatılıyor")
 
 
 app = FastAPI(

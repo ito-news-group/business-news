@@ -1,34 +1,121 @@
 import os
 import logging
-import time
-import tiktoken
-from datetime import datetime, timezone
+from abc import ABC, abstractmethod
+from pathlib import Path
 from dotenv import load_dotenv
 from supabase import create_client
-from openai import APIError, RateLimitError, APITimeoutError
 
-load_dotenv()
+from pipeline.rag.chunker import ChunkerFactory
+
+ROOT_DIR = Path(__file__).resolve().parents[2]
+load_dotenv(ROOT_DIR / ".env")
 logger = logging.getLogger(__name__)
 
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+HF_TOKEN = os.getenv("HF_TOKEN")
 
-EMBEDDING_MODEL = "text-embedding-3-small"
-CHUNK_SIZE = 500
-CHUNK_OVERLAP = 50
+CHUNK_STRATEGY = "recursive"
+PARENT_SIZE = 400
+CHILD_SIZE = 120
+CHILD_OVERLAP = 30
 PAGE_SIZE = 1000
-MAX_RETRIES = 3
-
 BATCH_SIZE = 20
+EMBED_DIM = 1024
+EMBED_MODEL_NAME = "BAAI/bge-m3"
+EMBED_COLUMN = "embedding_new"
+USE_RERANKER = True
 
 
-def get_unembedded_articles(client) -> list:
+class Embedder(ABC):
+    @abstractmethod
+    def embed(self, text: str) -> list[float]:
+        ...
+
+    @property
+    @abstractmethod
+    def dimension(self) -> int:
+        ...
+
+    @property
+    @abstractmethod
+    def model_name(self) -> str:
+        ...
+
+
+class HuggingFaceEmbedder(Embedder):
+    def __init__(self, model_name: str = EMBED_MODEL_NAME):
+        self._model_name = model_name
+        self._model = None
+        self._dimension = 0
+
+    def _load(self):
+        if self._model is not None:
+            return
+        try:
+            from sentence_transformers import SentenceTransformer
+
+            self._model = SentenceTransformer(
+                self._model_name,
+                token=HF_TOKEN if HF_TOKEN else None,
+            )
+            self._dimension = self._model.get_embedding_dimension()
+            logger.info(f"Embedding model loaded: {self._model_name} ({self._dimension}-dim)")
+        except Exception as e:
+            logger.error(f"Model yuklenemedi ({self._model_name}): {e}")
+            raise
+
+    def embed(self, text: str) -> list[float]:
+        self._load()
+        try:
+            return self._model.encode(text).tolist()
+        except Exception as e:
+            logger.error(f"Embedding sirasinda hata: {e}")
+            raise
+
+    @property
+    def dimension(self) -> int:
+        self._load()
+        return self._dimension
+
+    @property
+    def model_name(self) -> str:
+        return self._model_name
+
+
+class EmbedderFactory:
+    _providers = {
+        "huggingface": HuggingFaceEmbedder,
+    }
+
+    @classmethod
+    def create(cls, provider: str = "huggingface", **kwargs) -> Embedder:
+        provider = provider.lower()
+        if provider not in cls._providers:
+            logger.warning(f"Bilinmeyen provider '{provider}', huggingface kullaniliyor")
+            provider = "huggingface"
+        try:
+            return cls._providers[provider](**kwargs)
+        except Exception as e:
+            logger.error(f"Embedder olusturulamadi ({provider}): {e}, huggingface'e dusuluyor")
+            return HuggingFaceEmbedder(**kwargs)
+
+
+def get_embedder() -> Embedder:
+    model_name = os.getenv("RAG_EMBED_MODEL", EMBED_MODEL_NAME)
+    logger.info(f"Embedding model: {model_name}")
+    return HuggingFaceEmbedder(model_name=model_name)
+
+
+def get_unembedded_articles(client, force: bool = False) -> list:
     try:
-        embedded_ids = client.table("article_embeddings").select("article_id").execute()
-        embedded_set = {row["article_id"] for row in embedded_ids.data}
+        rows = client.table("article_embeddings").select("article_id, embedding_new").execute()
+        if force:
+            embedded_set = {row["article_id"] for row in rows.data if row.get("embedding_new") is not None}
+        else:
+            embedded_set = {row["article_id"] for row in rows.data}
     except Exception as e:
-        logger.error(f"Embedding ID'leri alınamadı: {e}")
+        logger.error(f"Embedding ID'leri alinamadi: {e}")
         raise
 
     unembedded = []
@@ -43,14 +130,15 @@ def get_unembedded_articles(client) -> list:
                 .execute()
             )
         except Exception as e:
-            logger.error(f"Article sayfası alınamadı (offset={offset}): {e}")
+            logger.error(f"Article sayfasi alinamadi (offset={offset}): {e}")
             raise
 
         if not page.data:
             break
 
         for a in page.data:
-            if a["id"] not in embedded_set:
+            text = a.get("full_text") or ""
+            if a["id"] not in embedded_set and len(text) >= 300:
                 unembedded.append(a)
 
         if len(page.data) < PAGE_SIZE:
@@ -61,81 +149,87 @@ def get_unembedded_articles(client) -> list:
     return unembedded
 
 
-def embed_text(text: str, openai_client) -> list[float]:
-    last_error = None
-    for attempt in range(MAX_RETRIES):
-        try:
-            response = openai_client.embeddings.create(
-                model=EMBEDDING_MODEL,
-                input=text,
-                timeout=30
-            )
-            return response.data[0].embedding
-        except RateLimitError:
-            wait = 2 ** (attempt + 1)
-            logger.warning(f"Embedding rate limit, retrying in {wait}s (attempt {attempt + 1})")
-            time.sleep(wait)
-            last_error = "rate limit"
-        except APITimeoutError:
-            wait = 2 ** attempt
-            logger.warning(f"Embedding timeout, retrying in {wait}s (attempt {attempt + 1})")
-            time.sleep(wait)
-            last_error = "timeout"
-        except APIError as e:
-            logger.error(f"OpenAI API hatası (embedding): {e}")
-            raise
-    raise RuntimeError(f"Embedding başarısız ({last_error}), {len(text)} karakterlik metin embed edilemedi.")
+BOILERPLATE_PATTERNS = [
+    r"haberin devamı için",
+    r"haberin devamini okumak",
+    r"yazının devamı",
+    r"yazinin devami",
+    r"daha fazla oku",
+    r"için tıklayın",
+    r"icin tiklayin",
+    r"read more",
+    r"click here",
+    r"bültenimize abone ol",
+    r"bultenimize abone ol",
+    r"e-posta adresinizi",
+    r"eposta adresinizi",
+    r"gizlilik politikası",
+    r"gizlilik politikasi",
+    r"çerez politikası",
+    r"cerez politikasi",
+    r"kaynak gösterilmeden",
+    r"kaynak gosterilmeden",
+    r"alarak haberlerimizi",
+    r"tercih edilen kaynak",
+    r"haberlerimizi google",
+]
 
 
-def chunk_text(text: str, chunk_size: int = CHUNK_SIZE, overlap: int = CHUNK_OVERLAP) -> list[str]:
-    try:
-        encoder = tiktoken.get_encoding("cl100k_base")
-        tokens = encoder.encode(text)
-    except Exception as e:
-        logger.warning(f"tiktoken hatası, boşluk bazlı bölmeye düşülüyor: {e}")
-        words = text.split()
-        chunks = []
-        start = 0
-        while start < len(words):
-            end = start + chunk_size
-            chunks.append(" ".join(words[start:end]))
-            start += chunk_size - overlap
-        return chunks if chunks else [text]
-
-    if len(tokens) <= chunk_size:
-        return [text]
-
-    chunks = []
-    start = 0
-    while start < len(tokens):
-        end = start + chunk_size
-        chunk_tokens = tokens[start:end]
-        chunk_text = encoder.decode(chunk_tokens)
-        chunks.append(chunk_text)
-        start += chunk_size - overlap
-
-    return chunks
+def clean_text(text: str) -> str:
+    import re
+    if not text:
+        return ""
+    text = re.sub(r"<[^>]+>", " ", text)
+    for pattern in BOILERPLATE_PATTERNS:
+        text = re.sub(pattern, " ", text, flags=re.IGNORECASE)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
 
 
-def run_embedding():
-    from openai import OpenAI
+def combine_article_text(article: dict) -> str:
+    parts = []
+    if article.get("title"):
+        parts.append(article["title"])
+    if article.get("summary"):
+        parts.append(clean_text(article["summary"]))
+    if article.get("full_text"):
+        parts.append(clean_text(article["full_text"]))
+    return " | ".join(parts)
 
+
+def run_embedding(clean: bool = False):
     try:
         supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
     except Exception as e:
-        logger.error(f"Supabase bağlantı hatası: {e}")
+        logger.error(f"Supabase baglanti hatasi: {e}")
+        return 0
+
+    if clean:
+        logger.info("Cleaning all existing embeddings...")
+        try:
+            supabase.table("article_embeddings").delete().neq("id", 0).execute()
+            logger.info("All embeddings deleted.")
+        except Exception as e:
+            logger.error(f"Clean hatasi: {e}")
+            return 0
+
+    try:
+        embedder = get_embedder()
+    except Exception as e:
+        logger.error(f"Embedder olusturulamadi: {e}")
         return 0
 
     try:
-        openai_client = OpenAI(api_key=OPENAI_API_KEY, timeout=30)
+        chunker = ChunkerFactory.create(CHUNK_STRATEGY)
+        logger.info(f"Chunk stratejisi: {CHUNK_STRATEGY}")
     except Exception as e:
-        logger.error(f"OpenAI client oluşturulamadı: {e}")
+        logger.error(f"Chunker olusturulamadi: {e}")
         return 0
 
     try:
-        articles = get_unembedded_articles(supabase)
+        articles = get_unembedded_articles(supabase, force=True)
     except Exception as e:
-        logger.error(f"Makaleler alınamadı: {e}")
+        logger.error(f"Makaleler alinamadi: {e}")
         return 0
 
     if not articles:
@@ -146,38 +240,42 @@ def run_embedding():
     inserted_chunks = []
 
     for article in articles:
-        text_parts = []
-        if article.get("title"):
-            text_parts.append(article["title"])
-        if article.get("summary"):
-            text_parts.append(article["summary"])
-        if article.get("full_text"):
-            text_parts.append(article["full_text"])
-
-        combined = " | ".join(text_parts)
+        combined = combine_article_text(article)
         if not combined.strip():
             logger.warning(f"Skipping article {article['id']}: no text content")
             continue
 
         try:
-            chunks = chunk_text(combined)
+            chunk_pairs = chunker.split_with_parent(
+                combined,
+                parent_size=PARENT_SIZE,
+                child_size=CHILD_SIZE,
+                overlap=CHILD_OVERLAP,
+            )
         except Exception as e:
-            logger.error(f"Article {article['id']} chunk hatası: {e}, atlanıyor.")
+            logger.error(f"Article {article['id']} chunk hatasi: {e}, atlaniyor.")
             continue
 
-        logger.info(f"Article {article['id']}: {len(chunks)} chunk(s)")
+        if not chunk_pairs:
+            chunk_pairs = [{"chunk_text": combined, "parent_text": combined}]
 
-        for i, chunk in enumerate(chunks):
+        logger.info(f"Article {article['id']}: {len(chunk_pairs)} parent-child chunk(s)")
+
+        for i, pair in enumerate(chunk_pairs):
+            child_text = pair["chunk_text"]
+            parent_text = pair["parent_text"]
+
             try:
-                vector = embed_text(chunk, openai_client)
+                vector = embedder.embed(child_text)
             except Exception as e:
-                logger.error(f"Article {article['id']} chunk {i} embedding hatası: {e}, atlanıyor.")
+                logger.error(f"Article {article['id']} chunk {i} embedding hatasi: {e}, atlaniyor.")
                 continue
 
             inserted_chunks.append({
                 "article_id": article["id"],
-                "embedding": vector,
-                "chunk_text": chunk,
+                EMBED_COLUMN: vector,
+                "chunk_text": child_text,
+                "parent_text": parent_text,
                 "chunk_index": i,
             })
             total_chunks += 1
@@ -185,22 +283,26 @@ def run_embedding():
             if len(inserted_chunks) >= BATCH_SIZE:
                 try:
                     supabase.table("article_embeddings").insert(inserted_chunks).execute()
-                    logger.info(f"Batch insert: {len(inserted_chunks)} chunk yazıldı.")
+                    logger.info(f"Batch insert: {len(inserted_chunks)} chunk yazildi.")
                     inserted_chunks = []
                 except Exception as e:
-                    logger.error(f"Batch insert hatası: {e}")
+                    logger.error(f"Batch insert hatasi: {e}")
 
     if inserted_chunks:
         try:
             supabase.table("article_embeddings").insert(inserted_chunks).execute()
-            logger.info(f"Final batch: {len(inserted_chunks)} chunk yazıldı.")
+            logger.info(f"Final insert: {len(inserted_chunks)} chunk yazildi.")
         except Exception as e:
-            logger.error(f"Final batch insert hatası: {e}")
+            logger.error(f"Final insert hatasi: {e}")
 
     logger.info(f"Done. {total_chunks} embedding(s) written.")
     return total_chunks
 
 
 if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--clean", action="store_true", help="Delete all embeddings before re-embedding")
+    args = parser.parse_args()
     logging.basicConfig(level=logging.INFO)
-    run_embedding()
+    run_embedding(clean=args.clean)

@@ -1,7 +1,8 @@
 FROM python:3.11-slim
 
-# Playwright sistem bağımlılıkları
+# Sistem bağımlılıkları (Playwright + torch)
 RUN apt-get update && apt-get install -y \
+    build-essential \
     cron \
     curl \
     wget \
@@ -10,11 +11,17 @@ RUN apt-get update && apt-get install -y \
 
 WORKDIR /app
 
+# Pipeline bağımlılıkları (önce — daha az değişir, layer cache)
+COPY pipeline/requirements.txt ./pipeline-requirements.txt
+RUN pip install --no-cache-dir -r pipeline-requirements.txt
+
+# Scraper bağımlılıkları
 COPY scraper/requirements.txt ./scraper-requirements.txt
 RUN pip install --no-cache-dir -r scraper-requirements.txt
 RUN playwright install chromium
 RUN playwright install-deps chromium
 
+# Kaynak kod
 COPY scraper/ ./scraper/
 COPY pipeline/ ./pipeline/
 COPY .env.example .env.example

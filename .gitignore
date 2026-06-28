@@ -13,6 +13,7 @@ dist/
 build/
 .DS_Store
 Thumbs.db
+*.log
 logs/*.log
 *.db
 .playwright/

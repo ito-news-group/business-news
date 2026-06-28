@@ -1,6 +1,6 @@
-FROM python:3.11-slim
+FROM python:3.11-bookworm
 
-# Playwright sistem bağımlılıkları
+# Sistem bağımlılıkları
 RUN apt-get update && apt-get install -y \
     cron \
     curl \
@@ -18,9 +18,8 @@ RUN pip install --no-cache-dir -r scraper-requirements.txt
 COPY pipeline/requirements.txt ./pipeline-requirements.txt
 RUN pip install --no-cache-dir -r pipeline-requirements.txt
 
-# Playwright chromium
-RUN playwright install chromium
-RUN playwright install-deps chromium
+# Playwright chromium (tek komutta bağımlılıklarla)
+RUN playwright install --with-deps chromium
 
 # Uygulama dosyaları
 COPY scraper/ ./scraper/

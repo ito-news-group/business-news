@@ -168,6 +168,7 @@ def _fallback_search_similar_chunks(embedding: list[float], sector: Optional[str
 def search_similar_chunks(query, sector: Optional[str], client) -> list[dict]:
     if isinstance(query, str):
         try:
+            # RAG araması, kullanıcı sorusuna göre benzer haberleri Supabase'teki articles tablosundan çeker.
             articles = (
                 client.table("articles")
                 .select("id, title, summary, full_text, sector")
@@ -253,14 +254,15 @@ def _build_local_answer(question: str, chunks: list[dict], article_map: dict) ->
         summary = (article or {}).get("summary") or ""
 
         if title and summary:
-            snippets.append(f"{title}: {summary[:180]}")
+            clean_summary = re.sub(r"\s+", " ", summary).strip()
+            snippets.append(f"- {title}: {clean_summary[:220]}")
         elif title:
-            snippets.append(title)
+            snippets.append(f"- {title}")
         elif chunk.get("chunk_text"):
-            snippets.append(chunk["chunk_text"][:180])
+            snippets.append(f"- {chunk['chunk_text'][:220]}")
 
     if snippets:
-        return f"Benzer haberlerden özet: {' | '.join(snippets)}"
+        return "Benzer haberlerden özet:\n" + "\n".join(snippets)
 
     return f"Bu konuda benzer haberler bulundu: {chunks[0]['chunk_text']}"
 
@@ -268,6 +270,7 @@ def _build_local_answer(question: str, chunks: list[dict], article_map: dict) ->
 def generate_answer(question: str, chunks: list[dict], client) -> str:
     try:
         article_ids = [chunk["article_id"] for chunk in chunks[:3]]
+        # Cevap oluşturmak için seçilen makalelerin başlık ve özet bilgileri yine articles tablosundan çekilir.
         articles = (
             client.table("articles")
             .select("id, title, summary")

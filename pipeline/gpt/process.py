@@ -135,11 +135,10 @@ def _normalize_summary(summary: Any) -> str:
     return "\n".join(f"• {item}" for item in items)
 
 
-def process_article(article: dict[str, Any], openai_client: OpenAI) -> dict[str, str]:
+def process_article(article: dict[str, Any], openai_client: OpenAI) -> dict[str, str] | None:
     """
     Tek haber için GPT-4o-mini çağrısı yapar.
-    Dönüş:
-      {"sector": "finans", "summary": "• ...\\n• ...\\n• ..."}
+    Başarısız olursa None döner — haber işlenmeden geçilir.
     """
     title = article.get("title") or ""
     full_text = article.get("full_text") or ""
@@ -183,10 +182,7 @@ Haber metni:
 
     except Exception as exc:
         logger.exception("GPT haber işleme hatası. article_id=%s error=%s", article.get("id"), exc)
-        return {
-            "sector": "diger",
-            "summary": _normalize_summary(old_summary or title or "Haber özeti üretilemedi."),
-        }
+        return None
 
 
 def run_classification() -> int:
@@ -194,6 +190,7 @@ def run_classification() -> int:
     Pipeline ana fonksiyonu.
     Bugünkü işlenmemiş haberleri alır, GPT ile sector + summary üretir,
     articles tablosunu günceller.
+    GPT'ye ulaşılamazsa haber atlanır, alanlar boş kalır.
     """
     supabase_client, openai_client = get_clients()
 
@@ -209,6 +206,10 @@ def run_classification() -> int:
         logger.info("İşleniyor: id=%s title=%s", article_id, title)
 
         result = process_article(article, openai_client)
+
+        if result is None:
+            logger.warning("Atlanıyor (GPT hatası): id=%s", article_id)
+            continue
 
         supabase_client.table("articles").update({
             "sector": result["sector"],

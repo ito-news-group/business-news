@@ -7,6 +7,7 @@ Görev:
   Bugünün haberlerini sektöre göre gruplar.
   Her sektör için GPT-4o-mini ile günlük sektör özeti üretir.
   daily_summaries tablosuna yazar.
+  GPT'ye ulaşılamazsa o sektör atlanır, veritabanına yazılmaz.
 """
 
 import json
@@ -143,16 +144,10 @@ def _calculate_avg_sentiment(articles: list[dict[str, Any]]) -> float | None:
     return sum(float(score) for score in scores) / len(scores)
 
 
-def summarize_sector(sector: str, articles: list[dict[str, Any]], openai_client: OpenAI) -> dict[str, Any]:
+def summarize_sector(sector: str, articles: list[dict[str, Any]], openai_client: OpenAI) -> dict[str, Any] | None:
     """
     Bir sektörün günlük özetini üretir.
-    Dönüş:
-      {
-        "bullet_points": ["• ...", "• ...", "• ..."],
-        "headline": "...",
-        "article_count": 5,
-        "avg_sentiment": None
-      }
+    GPT'ye ulaşılamazsa None döner — sektör atlanır.
     """
     article_lines = []
 
@@ -188,17 +183,16 @@ Bugünkü haberler:
         bullet_points = _normalize_bullets(data.get("bullet_points", []))
         headline = str(data.get("headline") or bullet_points[0].lstrip("•").strip()).strip()
 
+        return {
+            "bullet_points": bullet_points,
+            "headline": headline,
+            "article_count": len(articles),
+            "avg_sentiment": _calculate_avg_sentiment(articles),
+        }
+
     except Exception as exc:
         logger.exception("Günlük sektör özeti hatası. sector=%s error=%s", sector, exc)
-        bullet_points = _normalize_bullets([article.get("title", "") for article in articles[:3]])
-        headline = bullet_points[0].lstrip("•").strip() if bullet_points else "Sektördeki gelişmeler takip edildi."
-
-    return {
-        "bullet_points": bullet_points,
-        "headline": headline,
-        "article_count": len(articles),
-        "avg_sentiment": _calculate_avg_sentiment(articles),
-    }
+        return None
 
 
 def run_daily_sector_summary() -> int:
@@ -207,6 +201,7 @@ def run_daily_sector_summary() -> int:
     Bugünkü haberleri sektöre göre gruplar,
     her sektör için günlük özet üretir,
     daily_summaries tablosuna upsert eder.
+    GPT'ye ulaşılamazsa o sektör atlanır.
     """
     supabase_client, openai_client = get_clients()
     today = datetime.now(timezone.utc).date().isoformat()
@@ -223,6 +218,10 @@ def run_daily_sector_summary() -> int:
         logger.info("Sektör özeti üretiliyor: sector=%s article_count=%s", sector, len(articles))
 
         result = summarize_sector(sector, articles, openai_client)
+
+        if result is None:
+            logger.warning("Sektör özeti atlanıyor (GPT hatası): %s", sector)
+            continue
 
         supabase_client.table("daily_summaries").upsert({
             "sector": sector,

@@ -9,6 +9,10 @@ Strateji:
   1. Liste sayfasını scroll ederek tüm linkleri topla
   2. Her detay sayfasında meta tag'lerden veri çek
   3. Supabase articles tablosuna yaz
+
+Backfill:
+  .env'de SCRAPE_DAYS_BACK=30 yazarsan son 30 günün haberlerini çeker.
+  Default 1 — sadece bugünün haberleri.
 """
 
 import asyncio
@@ -16,7 +20,7 @@ import hashlib
 import logging
 import os
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Optional
 
 from playwright.async_api import async_playwright, Page, TimeoutError as PlaywrightTimeout
@@ -32,9 +36,23 @@ SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 TARGET_URL = os.getenv("SCRAPER_TARGET_URL", "https://istanbulticaretgazetesi.com/son-dakika")
 SOURCE_ID = int(os.getenv("SCRAPER_SOURCE_ID", "1"))
+SCRAPE_DAYS_BACK_ENV = os.getenv("SCRAPE_DAYS_BACK")
 
 MAX_SCROLL_ATTEMPTS = 15
 SCROLL_PAUSE = 2.0
+
+
+def get_days_back(client: Client) -> int:
+    """Veritabanındaki en son habere göre kaç gün geriye gidileceğini hesapla"""
+    try:
+        result = client.table("articles").select("published_at").order("published_at", desc=True).limit(1).execute()
+        if not result.data or not result.data[0].get("published_at"):
+            return 30  # Hiç haber yoksa 30 güne bak
+        last_date = datetime.fromisoformat(result.data[0]["published_at"]).date()
+        delta = (datetime.now(timezone.utc).date() - last_date).days
+        return max(delta + 1, 1)
+    except Exception:
+        return 1  # Hata olursa güvenli default
 
 
 def get_supabase() -> Client:
@@ -50,13 +68,60 @@ def get_existing_hashes(client: Client) -> set:
     return {row["url_hash"] for row in result.data}
 
 
+def clean_full_text(full_text: str, summary: str = "") -> str:
+    """full_text'i temizle ve başına summary ekle"""
+    text = full_text.strip()
+
+    # Baştaki gereksiz kısımları at
+    # "Google'da bizi tercih edilen kaynak..." satırına kadar olan her şeyi sil
+    cutoff_phrases = [
+        "Google'da bizi tercih edilen kaynak olarak ekleyin",
+        "İstanbul Ticaret Gazetesi'i tercih edilen kaynak",
+    ]
+    for phrase in cutoff_phrases:
+        idx = text.find(phrase)
+        if idx != -1:
+            end_idx = text.find("\n", idx)
+            if end_idx != -1:
+                text = text[end_idx:].strip()
+            else:
+                # Satır sonu yoksa bu ifadenin sonundan devam et
+                text = text[idx + len(phrase):].strip()
+            break
+
+    # Sondaki yorum alanını at
+    end_phrases = [
+        "Yorum yazmak için giriş yapın",
+        "İlk yorumu siz yazın",
+    ]
+    for phrase in end_phrases:
+        idx = text.find(phrase)
+        if idx != -1:
+            text = text[:idx].strip()
+            break
+
+    # Sondaki yazar bilgisini temizle
+    # Örnek: "METE DİRİCE İstanbul Ticaret Gazetesi – Genel Yayın Yönetmeni"
+    text = re.sub(
+        r'\n?[A-ZÇĞİÖŞÜ][A-ZÇĞİÖŞÜa-zçğışöüé\s]{4,}\nİstanbul Ticaret Gazetesi.*$',
+        '',
+        text,
+        flags=re.DOTALL
+    ).strip()
+
+    # Başına summary ekle
+    if summary and summary.strip():
+        text = summary.strip() + "\n\n" + text
+
+    return text
+
+
 async def scroll_to_load_all(page: Page) -> None:
     """Sayfayı scroll ederek lazy-load haberlerin yüklenmesini bekle"""
     previous_count = 0
     stale = 0
 
     for attempt in range(MAX_SCROLL_ATTEMPTS):
-        # Haber linklerini say — site yapısına göre ana içerik linkleri
         links = await page.evaluate("""
             () => document.querySelectorAll('a[href*="istanbulticaretgazetesi.com/"]').length
         """)
@@ -100,14 +165,11 @@ async def get_article_links(page: Page) -> list:
                 const path = href.replace(base, '');
                 if (!path || path === '/') return;
 
-                // Hariç tutulan path'leri atla
                 if (exclude.some(ex => path.startsWith(ex))) return;
 
-                // Sadece slug formatındaki haberler (tek seviye path)
                 const parts = path.split('/').filter(Boolean);
                 if (parts.length !== 1) return;
 
-                // Hash (#) içerenleri atla
                 if (href.includes('#')) return;
 
                 if (!seen.has(href)) {
@@ -146,7 +208,6 @@ async def scrape_article_detail(page: Page, url: str) -> Optional[dict]:
                 return el ? el.getAttribute('content') : null;
             };
 
-            // Tam metin — Next.js'de genellikle article veya main içinde
             const contentSelectors = [
                 'article .prose',
                 'article [class*="content"]',
@@ -166,7 +227,6 @@ async def scrape_article_detail(page: Page, url: str) -> Optional[dict]:
                 }
             }
 
-            // Başlık
             const title = meta('meta-title') ||
                           document.querySelector('h1')?.innerText?.trim() ||
                           document.title?.replace(' — İstanbul Ticaret Gazetesi', '').trim();
@@ -176,8 +236,8 @@ async def scrape_article_detail(page: Page, url: str) -> Optional[dict]:
                 summary:     meta('description'),
                 imageUrl:    meta('og:image'),
                 author:      meta('article:author'),
-                publishedAt: meta('article:published_time'),  // ISO format: 2026-06-23T19:49:53+03:00
-                section:     meta('article:section'),          // 'Teknoloji', 'Ekonomi' vs.
+                publishedAt: meta('article:published_time'),
+                section:     meta('article:section'),
                 fullText:    fullText || ''
             };
         }
@@ -191,6 +251,11 @@ async def run_scraper() -> int:
     client = get_supabase()
     existing_hashes = get_existing_hashes(client)
     logger.info(f"Veritabanında {len(existing_hashes)} mevcut haber var.")
+
+    # .env'de SCRAPE_DAYS_BACK varsa onu kullan, yoksa DB'deki son habere göre hesapla
+    days_back = int(SCRAPE_DAYS_BACK_ENV) if SCRAPE_DAYS_BACK_ENV else get_days_back(client)
+    cutoff = datetime.now(timezone.utc) - timedelta(days=days_back)
+    logger.info(f"Backfill modu: son {days_back} gün ({cutoff.date()} ve sonrası)")
 
     new_articles = []
 
@@ -219,7 +284,6 @@ async def run_scraper() -> int:
         all_links = await get_article_links(page)
         logger.info(f"Toplam {len(all_links)} link bulundu.")
 
-        # Duplicate filtrele
         new_links = [
             url for url in all_links
             if make_url_hash(url) not in existing_hashes
@@ -242,16 +306,32 @@ async def run_scraper() -> int:
                 logger.warning(f"Veri alınamadı, atlanıyor: {url}")
                 continue
 
+            # Tarih kontrolü — cutoff'tan eski haberleri atla
+            published_at_str = detail.get("publishedAt")
+            if published_at_str:
+                try:
+                    published_at = datetime.fromisoformat(published_at_str)
+                    if published_at.tzinfo is None:
+                        published_at = published_at.replace(tzinfo=timezone.utc)
+                    if published_at < cutoff:
+                        logger.info(f"Eski haber, atlanıyor ({published_at.date()}): {url}")
+                        continue
+                except Exception:
+                    pass
+
+            summary = detail.get("summary") or ""
+            full_text = clean_full_text(detail.get("fullText") or "", summary)
+
             new_articles.append({
                 "source_id":    SOURCE_ID,
                 "url":          url,
                 "url_hash":     url_hash,
                 "title":        detail.get("title", ""),
-                "summary":      detail.get("summary") or "",
-                "full_text":    detail.get("fullText") or "",
+                "summary":      summary,
+                "full_text":    full_text,
                 "image_url":    detail.get("imageUrl") or None,
                 "author":       detail.get("author") or None,
-                "published_at": detail.get("publishedAt") or None,  # zaten ISO format
+                "published_at": published_at_str or None,
                 "scraped_at":   datetime.now(timezone.utc).isoformat(),
             })
 
@@ -261,7 +341,7 @@ async def run_scraper() -> int:
 
     # ADIM 3: Veritabanına yaz
     if new_articles:
-        result = client.table("articles").insert(new_articles).execute()
+        client.table("articles").insert(new_articles).execute()
         logger.info(f"{len(new_articles)} haber veritabanına yazıldı.")
     else:
         logger.info("Yazılacak yeni haber yok.")

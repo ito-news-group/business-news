@@ -10,14 +10,25 @@ RUN apt-get update && apt-get install -y \
 
 WORKDIR /app
 
+# Scraper bağımlılıkları
 COPY scraper/requirements.txt ./scraper-requirements.txt
 RUN pip install --no-cache-dir -r scraper-requirements.txt
+
+# Pipeline bağımlılıkları
+COPY pipeline/requirements.txt ./pipeline-requirements.txt
+RUN pip install --no-cache-dir -r pipeline-requirements.txt
+
+# Playwright chromium
 RUN playwright install chromium
 RUN playwright install-deps chromium
 
+# Uygulama dosyaları
 COPY scraper/ ./scraper/
 COPY pipeline/ ./pipeline/
 COPY .env.example .env.example
+
+# Log klasörü
+RUN mkdir -p /app/logs
 
 # Cron job: her gün 06:30'da pipeline çalışır
 RUN echo "30 6 * * * cd /app && python -m pipeline.run >> /app/logs/pipeline.log 2>&1" | crontab -

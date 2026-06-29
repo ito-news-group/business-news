@@ -30,7 +30,7 @@ COPY .env.example .env.example
 RUN mkdir -p /app/logs
 
 # Cron job: her gün 06:30'da pipeline çalışır
-RUN echo "30 6 * * * cd /app && python -m pipeline.run >> /app/logs/pipeline.log 2>&1" | crontab -
+RUN echo "40 6 * * * cd /app && python -m pipeline.run >> /app/logs/pipeline.log 2>&1" | crontab -
 
 # Cron arka planda çalışsın, HTTP server health check için ayakta dursun
 CMD ["sh", "-c", "cron && python -m http.server 8000"]

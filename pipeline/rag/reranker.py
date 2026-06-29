@@ -1,44 +1,63 @@
 import logging
+import os
 from typing import Optional
 
 logger = logging.getLogger(__name__)
 
 
-class CrossEncoderReranker:
-    def __init__(self, model_name: str = "seroe/bge-reranker-v2-m3-turkish-triplet", top_k: int = 3):
-        self.model_name = model_name
+class CohereReranker:
+    def __init__(self, model: str = "rerank-v3.5", top_k: int = 3, api_key: Optional[str] = None):
+        self.model = model
         self.top_k = top_k
-        self._model = None
+        self._api_key = api_key or os.getenv("COHERE_API_KEY")
+        self._client = None
 
-    def _load_model(self):
-        if self._model is not None:
+    def _load(self):
+        if self._client is not None:
+            return
+        if not self._api_key:
+            logger.warning("COHERE_API_KEY yok, rerank atlanacak")
             return
         try:
-            from sentence_transformers import CrossEncoder
-            self._model = CrossEncoder(self.model_name)
-            logger.info(f"Reranker model loaded: {self.model_name}")
+            import cohere
+            self._client = cohere.ClientV2(self._api_key)
+            logger.info(f"Cohere reranker hazir: {self.model}")
         except Exception as e:
-            logger.error(f"Reranker model yuklenemedi ({self.model_name}): {e}")
-            self._model = None
+            logger.error(f"Cohere client acilamadi: {e}")
+            self._client = None
 
-    def rerank(self, query: str, chunks: list[dict]) -> list[dict]:
+    def rerank(self, query: str, chunks: list[dict], top_k: Optional[int] = None) -> list[dict]:
         if not chunks:
             return chunks
-        self._load_model()
-        if self._model is None:
-            logger.warning("Reranker kullanilamiyor, siralamayi oldugu gibi dondur")
-            return chunks
+        self._load()
+        if self._client is None:
+            logger.info("Reranker yok, mevcut siralama donuluyor")
+            return chunks[: (top_k or self.top_k)]
 
+        k = top_k or self.top_k
+        documents = [c.get("chunk_text") or c.get("title") or "" for c in chunks]
         try:
-            pairs = [(query, c["chunk_text"]) for c in chunks]
-            scores = self._model.predict(pairs)
-            scored = list(zip(chunks, scores))
-            scored.sort(key=lambda x: x[1], reverse=True)
-            result = []
-            for chunk, score in scored[: self.top_k]:
-                chunk["rerank_score"] = float(score)
-                result.append(chunk)
-            return result
+            resp = self._client.rerank(
+                model=self.model,
+                query=query,
+                documents=documents,
+                top_n=k,
+            )
+            results = resp.results
+            reranked = []
+            for r in results:
+                idx = r.index
+                chunk = dict(chunks[idx])
+                chunk["rerank_score"] = float(r.relevance_score) if r.relevance_score is not None else 0.0
+                reranked.append(chunk)
+            logger.info(f"Cohere rerank: {len(reranked)} sonuc")
+            return reranked
         except Exception as e:
-            logger.error(f"Reranking sirasinda hata: {e}")
-            return chunks
+            logger.error(f"Cohere rerank hatasi: {e}")
+            return chunks[:k]
+
+
+def get_reranker(top_k: int = 3) -> Optional[CohereReranker]:
+    if not os.getenv("COHERE_API_KEY"):
+        return None
+    return CohereReranker(top_k=top_k)

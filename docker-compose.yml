@@ -10,8 +10,6 @@ services:
     ports:
       - "8000:8000"
     env_file: .env
-    volumes:
-      - ./logs:/app/logs
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
@@ -19,28 +17,11 @@ services:
       timeout: 10s
       retries: 3
 
-  # Pipeline (scraper + classification + newsletter)
+  # Pipeline (scraper + gpt + bert + embed + newsletter) — cron 06:30
   pipeline:
     build:
       context: .
       dockerfile: docker/Dockerfile.pipeline
     env_file: .env
-    volumes:
-      - ./logs:/app/logs
     restart: unless-stopped
-    # Cron ile 06:30'da çalışır, sürekli ayakta değil
-    # docker exec pipeline python -m pipeline.run  ile de manuel tetiklenebilir
-
-  # BERT Servisi (4. kişi dolduracak)
-  # bert-service:
-  #   build:
-  #     context: .
-  #     dockerfile: docker/Dockerfile.bert
-  #   ports:
-  #     - "8001:8001"
-  #   env_file: .env
-  #   restart: unless-stopped
-
-networks:
-  default:
-    name: ito-news-network
+    # docker exec pipeline python -m pipeline.run ile manuel tetiklenebilir

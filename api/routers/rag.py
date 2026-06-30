@@ -2,7 +2,9 @@ import asyncio
 import logging
 import os
 import re
+import threading
 import time
+import uuid as _uuid
 from collections import deque
 from functools import partial
 from pathlib import Path
@@ -14,8 +16,8 @@ from pydantic import BaseModel
 from api.db import get_supabase
 from dotenv import load_dotenv
 
-from pipeline.rag.reranker import CohereReranker
-from pipeline.rag.llm_providers import get_llm_provider, SYSTEM_PROMPT
+from api.reranker import CohereReranker
+from api.llm_providers import get_llm_provider, SYSTEM_PROMPT
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
 load_dotenv(ROOT_DIR / ".env")
@@ -42,15 +44,20 @@ _query_cache: dict[str, float] = {}
 QUERY_CACHE_TTL = 4.0
 _metrics_window = deque(maxlen=200)
 
+_cache_lock = threading.Lock()
+_rate_lock = threading.Lock()
+_metrics_lock = threading.Lock()
+
 
 def _record_metric(stage: str, ms: float, status: str, chunks: int = 0):
-    _metrics_window.append({
-        "ts": time.time(),
-        "stage": stage,
-        "ms": round(ms, 1),
-        "status": status,
-        "chunks": chunks,
-    })
+    with _metrics_lock:
+        _metrics_window.append({
+            "ts": time.time(),
+            "stage": stage,
+            "ms": round(ms, 1),
+            "status": status,
+            "chunks": chunks,
+        })
 
 
 # ---------- Embedding (Jina API) ----------
@@ -138,12 +145,25 @@ def validate_query(q: str) -> str:
 def check_query_dedup(q: str):
     key = q.lower().strip()
     now = time.time()
-    if key in _query_cache and now - _query_cache[key] < QUERY_CACHE_TTL:
-        raise HTTPException(429, "Ayni sorgu cok yakin zamanda soruldu, lutfen bekleyin")
-    _query_cache[key] = now
-    stale = [k for k, t in _query_cache.items() if now - t > 60]
-    for k in stale:
-        _query_cache.pop(k, None)
+    with _cache_lock:
+        if key in _query_cache and now - _query_cache[key] < QUERY_CACHE_TTL:
+            raise HTTPException(429, "Ayni sorgu cok yakin zamanda soruldu, lutfen bekleyin")
+        _query_cache[key] = now
+        stale = [k for k, t in _query_cache.items() if now - t > 60]
+        for k in stale:
+            _query_cache.pop(k, None)
+
+
+def validate_session_id(sid: Optional[str]) -> Optional[str]:
+    if sid is None:
+        return None
+    try:
+        uuid_obj = _uuid.UUID(sid)
+        if str(uuid_obj) == sid:
+            return sid
+        return None
+    except (ValueError, AttributeError):
+        return None
 
 
 # ---------- Auth (internal API key) ----------
@@ -166,12 +186,13 @@ _rate_state: dict[str, list[float]] = {}
 def check_rate_limit(client_ip: str):
     now = time.time()
     window = 60.0
-    hits = _rate_state.get(client_ip, [])
-    hits = [t for t in hits if now - t < window]
-    if len(hits) >= RATE_LIMIT:
-        raise HTTPException(429, f"Cok fazla istek (max {RATE_LIMIT}/dk)")
-    hits.append(now)
-    _rate_state[client_ip] = hits
+    with _rate_lock:
+        hits = _rate_state.get(client_ip, [])
+        hits = [t for t in hits if now - t < window]
+        if len(hits) >= RATE_LIMIT:
+            raise HTTPException(429, f"Cok fazla istek (max {RATE_LIMIT}/dk)")
+        hits.append(now)
+        _rate_state[client_ip] = hits
 
 
 # ---------- Token counting ----------
@@ -414,6 +435,7 @@ async def ask_question(request: AskRequest, req: Request):
         loop = asyncio.get_event_loop()
 
         request.question = validate_query(request.question)
+        request.session_id = validate_session_id(request.session_id)
         check_query_dedup(request.question)
         check_rate_limit(req.client.host if req.client else "unknown")
 

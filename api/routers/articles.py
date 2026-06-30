@@ -21,7 +21,7 @@ def get_articles(
     """Haberleri filtreli listeler"""
     client = get_supabase()
     query = client.table("articles").select(
-        "id, title, summary, author, published_at, sector, sentiment_gpt, sentiment_bert, url"
+        "id, title, summary, author, published_at, scraped_at, sector, sentiment_gpt, sentiment_bert, image_url, url"
     ).order("published_at", desc=True)
 
     if sector:
@@ -34,6 +34,45 @@ def get_articles(
     query = query.range(offset, offset + limit - 1)
     result = query.execute()
     return {"data": result.data, "count": len(result.data)}
+
+
+@router.get("/paginated")
+def get_articles_paginated(
+    sector: str = Query(None, description="Sektör slug'ı: 'finans', 'insaat' ..."),
+    page: int = Query(1, ge=1),
+    limit: int = Query(12, ge=1, le=100)
+):
+    """Sayfalı haber listesi — frontend pagination için"""
+    client = get_supabase()
+
+    def _apply_filters(query):
+        query = query.not_.is_("title", "null").neq("title", "")
+        query = query.not_.is_("summary", "null").neq("summary", "")
+        query = query.not_.is_("sector", "null").neq("sector", "")
+        query = query.not_.is_("image_url", "null").neq("image_url", "")
+        query = query.not_.is_("url", "null").neq("url", "")
+        if sector:
+            query = query.eq("sector", sector)
+        return query
+
+    count_query = _apply_filters(client.table("articles").select("id", count="exact"))
+    total = count_query.execute().count
+
+    data_query = _apply_filters(client.table("articles").select(
+        "id, title, summary, author, published_at, scraped_at, sector, sentiment_gpt, sentiment_bert, image_url, url"
+    ).order("published_at", desc=True))
+
+    offset = (page - 1) * limit
+    data_query = data_query.range(offset, offset + limit - 1)
+    result = data_query.execute()
+
+    return {
+        "data": result.data,
+        "total": total,
+        "page": page,
+        "limit": limit,
+        "total_pages": (total + limit - 1) // limit,
+    }
 
 
 @router.get("/{article_id}")

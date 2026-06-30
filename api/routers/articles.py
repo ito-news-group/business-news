@@ -47,7 +47,6 @@ def get_articles_paginated(
 
     def _apply_filters(query):
         query = query.not_.is_("title", "null").neq("title", "")
-        query = query.not_.is_("summary", "null").neq("summary", "")
         query = query.not_.is_("sector", "null").neq("sector", "")
         query = query.not_.is_("image_url", "null").neq("image_url", "")
         query = query.not_.is_("url", "null").neq("url", "")

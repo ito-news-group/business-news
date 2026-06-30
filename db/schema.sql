@@ -54,7 +54,17 @@ CREATE TABLE IF NOT EXISTS articles (
 
     -- BERT tarafından doldurulacak (pipeline/bert)
     sentiment_bert  TEXT,
-    sentiment_score_bert FLOAT
+    sentiment_score_bert FLOAT,
+
+    -- Full-text search için tsvector (hybrid retrieval: BM25 + vector)
+    tsv             tsvector
+        GENERATED ALWAYS AS (
+            to_tsvector('turkish',
+                coalesce(title, '') || ' ' ||
+                coalesce(summary, '') || ' ' ||
+                coalesce(full_text, '')
+            )
+        ) STORED
 );
 
 -- İndeksler
@@ -63,6 +73,7 @@ CREATE INDEX IF NOT EXISTS idx_articles_sector ON articles(sector);
 CREATE INDEX IF NOT EXISTS idx_articles_scraped_at ON articles(scraped_at DESC);
 CREATE INDEX IF NOT EXISTS idx_articles_url_hash ON articles(url_hash);
 CREATE INDEX IF NOT EXISTS idx_articles_source_id ON articles(source_id);
+CREATE INDEX IF NOT EXISTS idx_articles_tsv ON articles USING gin(tsv);
 
 -- ============================================================
 -- SEKTÖRLER TABLOSU
@@ -146,16 +157,19 @@ CREATE TABLE IF NOT EXISTS subscribers (
 CREATE TABLE IF NOT EXISTS article_embeddings (
     id              SERIAL PRIMARY KEY,
     article_id      INTEGER NOT NULL REFERENCES articles(id) ON DELETE CASCADE,
-    embedding       vector(1536),          -- OpenAI text-embedding-3-small boyutu
-    chunk_text      TEXT,                  -- Embed edilen metin parçası
-    chunk_index     INTEGER DEFAULT 0,     -- Uzun metinler bölünürse sıra numarası
-    created_at      TIMESTAMPTZ DEFAULT NOW()
+    embedding       vector(1024),          -- Jina Embeddings v3 boyutu
+    chunk_text      TEXT,                  -- Arama için kullanılan küçük parça (child)
+    parent_text     TEXT,                  -- Context için kullanılan büyük parça (parent)
+    chunk_index     INTEGER NOT NULL DEFAULT 0,
+    model_version   TEXT NOT NULL DEFAULT 'jina-v3-v1',
+    created_at      TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE(article_id, chunk_index, model_version)
 );
 
--- pgVector için cosine similarity indeksi (RAG aramaları için kritik)
-CREATE INDEX IF NOT EXISTS idx_embeddings_vector 
-    ON article_embeddings USING ivfflat (embedding vector_cosine_ops)
-    WITH (lists = 100);
+-- pgVector için HNSW indeksi (cosine similarity, RAG aramaları için kritik)
+CREATE INDEX IF NOT EXISTS idx_embeddings_vector
+    ON article_embeddings USING hnsw (embedding vector_cosine_ops)
+    WITH (m = 16, ef_construction = 64);
 
 CREATE INDEX IF NOT EXISTS idx_embeddings_article_id 
     ON article_embeddings(article_id);
@@ -195,23 +209,54 @@ CREATE TABLE IF NOT EXISTS pipeline_runs (
 -- Bu fonksiyon Supabase'de bir kere çalıştırılır.
 -- ============================================================
 CREATE OR REPLACE FUNCTION search_articles(
-    query_embedding vector(1536),
+    query_embedding vector(1024),
     sector_filter   text DEFAULT NULL,
     match_count     int  DEFAULT 5
 )
 RETURNS TABLE (
     article_id  int,
     chunk_text  text,
+    parent_text text,
+    chunk_index int,
     similarity  float
 )
 LANGUAGE sql AS $$
     SELECT
         ae.article_id,
         ae.chunk_text,
+        ae.parent_text,
+        ae.chunk_index,
         1 - (ae.embedding <=> query_embedding) AS similarity
     FROM article_embeddings ae
     JOIN articles a ON a.id = ae.article_id
-    WHERE (sector_filter IS NULL OR a.sector = sector_filter)
+    WHERE ae.model_version = 'jina-v3-v1'
+      AND (sector_filter IS NULL OR a.sector = sector_filter)
     ORDER BY ae.embedding <=> query_embedding
+    LIMIT match_count;
+$$;
+
+-- ============================================================
+-- RAG - FULL-TEXT SEARCH FONKSİYONU (BM25-style)
+-- Hybrid retrieval için ts_rank tabanlı arama
+-- ============================================================
+CREATE OR REPLACE FUNCTION fulltext_search_articles(
+    query_text  text,
+    match_count int DEFAULT 5
+)
+RETURNS TABLE (
+    id      int,
+    title   text,
+    url     text,
+    rank    real
+)
+LANGUAGE sql AS $$
+    SELECT
+        a.id,
+        a.title,
+        a.url,
+        ts_rank(a.tsv, plainto_tsquery('turkish', query_text)) AS rank
+    FROM articles a
+    WHERE a.tsv @@ plainto_tsquery('turkish', query_text)
+    ORDER BY rank DESC
     LIMIT match_count;
 $$;

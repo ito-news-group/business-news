@@ -9,26 +9,27 @@ Görev:
 
 Çalışma sırası:
   pipeline/run.py tarafından tüm adımlar bittikten sonra çağrılır.
-  Sabah 06:30'da başlayan pipeline'ın son adımı — 07:00'de bülten gönderilmiş olur.
 
 Girdi:
   - Supabase daily_summaries tablosu (bugünün sektör özetleri)
+  - Supabase articles tablosu (bugünün haberleri)
   - Supabase subscribers tablosu (aktif aboneler)
 
 Çıktı:
   - Abonelere HTML e-posta gönderilir
-  - newsletters tablosuna INSERT:
-      send_date, subject, html_content, recipient_count, status, sent_at
+  - newsletters tablosuna INSERT
 
 Şablon:
-  Jinja2 ile HTML şablonu oluştur.
-  Şablon dosyası: pipeline/newsletter/templates/bulletin.html
-  Şablon değişkenleri:
-    {{ date }}           bugünün tarihi
-    {{ summaries }}      sektör özetleri listesi
-      {{ s.sector }}     sektör adı
-      {{ s.headline }}   günün en önemli gelişmesi
-      {{ s.bullet_points }}  liste olarak bullet'lar
+  pipeline/newsletter/templates/bulletin.html
+  Değişkenler:
+    {{ bugunun_tarihi }}        "29 Haziran 2026"
+    {{ sector_summaries }}      daily_summaries listesi
+      {{ s.sector }}            sektör adı
+      {{ s.headline }}          manşet
+      {{ s.bullet_points }}     madde işaretleri
+    {{ articles }}              articles listesi
+      {{ a.title }}, {{ a.url }}, {{ a.summary }}
+      {{ a.image_url }}, {{ a.sector }}, {{ a.author }}
 """
 
 import os
@@ -36,8 +37,8 @@ import logging
 from datetime import datetime, timezone
 from dotenv import load_dotenv
 from supabase import create_client
-# from jinja2 import Environment, FileSystemLoader  # pip install jinja2
-# import resend  # pip install resend
+from jinja2 import Environment, FileSystemLoader
+import resend
 
 load_dotenv()
 logger = logging.getLogger(__name__)
@@ -47,9 +48,16 @@ SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 RESEND_API_KEY = os.getenv("RESEND_API_KEY")
 SENDER_EMAIL = os.getenv("SENDER_EMAIL", "bulten@itonews.com")
 
+AYLAR = ["", "Ocak", "Şubat", "Mart", "Nisan", "Mayıs", "Haziran",
+         "Temmuz", "Ağustos", "Eylül", "Ekim", "Kasım", "Aralık"]
+
+
+def _format_date(iso_date: str) -> str:
+    dt = datetime.fromisoformat(iso_date)
+    return f"{dt.day} {AYLAR[dt.month]} {dt.year}"
+
 
 def get_todays_summaries(client) -> list:
-    """Bugünün sektör özetlerini getir"""
     today = datetime.now(timezone.utc).date().isoformat()
     result = (
         client.table("daily_summaries")
@@ -60,8 +68,18 @@ def get_todays_summaries(client) -> list:
     return result.data
 
 
+def get_todays_articles(client) -> list:
+    today = datetime.now(timezone.utc).date().isoformat()
+    result = (
+        client.table("articles")
+        .select("*")
+        .gte("published_at", today)
+        .execute()
+    )
+    return result.data
+
+
 def get_active_subscribers(client) -> list:
-    """Aktif aboneleri getir"""
     result = (
         client.table("subscribers")
         .select("email, name, sectors")
@@ -71,63 +89,67 @@ def get_active_subscribers(client) -> list:
     return result.data
 
 
-def render_html(summaries: list, date: str) -> str:
-    """
-    TODO (Tolunay): Jinja2 ile HTML bülten oluştur.
-
-    pipeline/newsletter/templates/bulletin.html şablonunu kullan.
-    Şablonu sen tasarlayacaksın — marka renkleri, logo, düzen serbest.
-    """
-    # env = Environment(loader=FileSystemLoader("pipeline/newsletter/templates"))
-    # template = env.get_template("bulletin.html")
-    # return template.render(date=date, summaries=summaries)
-    raise NotImplementedError("Tolunay implement edecek")
+def render_html(summaries: list, articles: list, date: str) -> str:
+    env = Environment(loader=FileSystemLoader("pipeline/newsletter/templates"))
+    template = env.get_template("bulletin.html")
+    return template.render(
+        bugunun_tarihi=date,
+        sector_summaries=summaries,
+        articles=articles
+    )
 
 
 def send_email(to_email: str, subject: str, html: str) -> bool:
-    """
-    TODO (Tolunay): Resend API ile e-posta gönder.
-    Dönüş: True (başarılı) / False (hata)
-    """
-    # resend.api_key = RESEND_API_KEY
-    # resend.Emails.send({
-    #     "from": SENDER_EMAIL,
-    #     "to": to_email,
-    #     "subject": subject,
-    #     "html": html,
-    # })
-    raise NotImplementedError("Tolunay implement edecek")
+    resend.api_key = RESEND_API_KEY
+    try:
+        r = resend.Emails.send({
+            "from": SENDER_EMAIL,
+            "to": to_email,
+            "subject": subject,
+            "html": html,
+        })
+        return r.get("id") is not None
+    except Exception as e:
+        logger.error(f"E-posta gönderilemedi: {to_email} — {e}")
+        return False
 
 
 def run_newsletter():
-    """
-    Ana fonksiyon — pipeline/run.py bu fonksiyonu çağırır.
-    TODO (Tolunay): Özetleri al, HTML oluştur, abonelere gönder, kayıt yaz.
-    """
     client = create_client(SUPABASE_URL, SUPABASE_KEY)
-    today = datetime.now(timezone.utc).date().isoformat()
+    today_iso = datetime.now(timezone.utc).date().isoformat()
 
     summaries = get_todays_summaries(client)
     if not summaries:
         logger.warning("Bugün için özet yok, bülten gönderilmiyor.")
         return
 
-    subscribers = get_active_subscribers(client)
-    logger.info(f"{len(subscribers)} aboneye bülten gönderilecek")
+    articles = get_todays_articles(client)
+    date_str = _format_date(today_iso)
+    html = render_html(summaries, articles, date_str)
 
-    # TODO: render_html ile HTML oluştur
-    # TODO: Her abone için send_email çağır
-    #   (opsiyonel: abonenin sectors listesi varsa sadece o sektörleri gönder)
-    # TODO: newsletters tablosuna kayıt yaz:
-    # client.table("newsletters").insert({
-    #     "send_date": today,
-    #     "subject": f"İTO Haber Bülteni — {today}",
-    #     "html_content": html,
-    #     "recipient_count": len(subscribers),
-    #     "status": "sent",
-    #     "sent_at": datetime.now(timezone.utc).isoformat()
-    # }).execute()
-    raise NotImplementedError("Tolunay implement edecek")
+    subscribers = get_active_subscribers(client)
+    if not subscribers:
+        logger.warning("Aktif abone yok, bülten gönderilmiyor.")
+        return
+
+    logger.info(f"{len(subscribers)} aboneye bülten gönderiliyor...")
+
+    success_count = 0
+    for sub in subscribers:
+        ok = send_email(sub["email"], f"Business News — {date_str}", html)
+        if ok:
+            success_count += 1
+
+    client.table("newsletters").insert({
+        "send_date": today_iso,
+        "subject": f"Business News — {date_str}",
+        "html_content": html,
+        "recipient_count": success_count,
+        "status": "sent" if success_count > 0 else "failed",
+        "sent_at": datetime.now(timezone.utc).isoformat()
+    }).execute()
+
+    logger.info(f"Bülten gönderildi: {success_count}/{len(subscribers)} başarılı")
 
 
 if __name__ == "__main__":

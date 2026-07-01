@@ -1,3 +1,8 @@
+# Local documentation files
+generate_pdf.py
+DOCUMENTATION.md
+Business_News_Dokumantasyon.pdf
+
 .env
 __pycache__/
 *.pyc

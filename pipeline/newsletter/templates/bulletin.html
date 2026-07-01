@@ -1,35 +1,158 @@
 <!DOCTYPE html>
 <html lang="tr">
 <head>
-  <meta charset="UTF-8">
-  <title>İTO Haber Bülteni — {{ date }}</title>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Günlük Business Haber Bülteni</title>
+    <style>
+        body, table, td, a { text-size-adjust: 100%; -webkit-text-size-adjust: 100%; }
+        table, td { mso-table-lspace: 0pt; mso-table-rspace: 0pt; border-collapse: collapse !important; }
+        img { -ms-interpolation-mode: bicubic; border: 0; height: auto; line-height: 100%; outline: none; text-decoration: none; }
+        body { height: 100% !important; margin: 0 !important; padding: 0 !important; width: 100% !important; background-color: #f1f5f9; font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; }
+    </style>
 </head>
-<body style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
+<body style="margin: 0; padding: 0; background-color: #f1f5f9;">
 
-  <!-- TODO (Tolunay): Bu şablonu tasarla, aşağısı sadece iskelet -->
+    <table border="0" cellpadding="0" cellspacing="0" width="100%" style="background-color: #f1f5f9; padding: 20px 0;">
+        <tr>
+            <td align="center">
+                
+                <table border="0" cellpadding="0" cellspacing="0" width="100%" style="max-width: 600px; background-color: #ffffff; border-radius: 12px; overflow: hidden; box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05), 0 2px 4px -1px rgba(0, 0, 0, 0.06); border: 1px solid #e2e8f0;">
+                    
+                    <tr>
+                        <td align="left" style="background-color: #0f172a; padding: 32px 24px; border-bottom: 4px solid #4f46e5;">
+                            <table border="0" cellpadding="0" cellspacing="0" width="100%">
+                                <tr>
+                                    <td>
+                                        <span style="color: #4f46e5; font-size: 12px; font-weight: 700; letter-spacing: 0.1em; text-transform: uppercase;">Yapay Zeka Destekli Bilgi Akışı</span>
+                                        <h1 style="margin: 4px 0 0 0; color: #ffffff; font-size: 24px; font-weight: 800; letter-spacing: -0.025em;">BUSINESS NEWS</h1>
+                                    </td>
+                                    <td align="right" valign="bottom">
+                                        <span style="color: #94a3b8; font-size: 13px; font-weight: 500;">{{ bugunun_tarihi }}</span>
+                                    </td>
+                                </tr>
+                            </table>
+                        </td>
+                    </tr>
 
-  <h1 style="color: #1E3A5F;">İTO Haber Bülteni</h1>
-  <p style="color: #666;">{{ date }}</p>
+                    <tr>
+                        <td style="padding: 24px;">
+                            
+                            <table border="0" cellpadding="0" cellspacing="0" width="100%" style="margin-bottom: 32px;">
+                                <tr>
+                                    <td style="padding-bottom: 16px; border-bottom: 2px solid #f1f5f9;">
+                                        <h2 style="margin: 0; color: #1e293b; font-size: 18px; font-weight: 700;">Sektörel Günlük Bakış</h2>
+                                        <p style="margin: 4px 0 0 0; color: #64748b; font-size: 13px;">Bugün sektörlerde öne çıkan gelişmelerin yapay zeka analizi.</p>
+                                    </td>
+                                </tr>
+                                <tr>
+                                    <td style="padding-top: 16px;">
+                                        {% for summary in sector_summaries %}
+                                        <table border="0" cellpadding="0" cellspacing="0" width="100%" style="background-color: #f8fafc; border-left: 4px solid #4f46e5; border-radius: 0 8px 8px 0; margin-bottom: 12px;">
+                                            <tr>
+                                                <td style="padding: 16px;">
+                                                    <span style="display: inline-block; background-color: #eff6ff; color: #1e40af; font-size: 11px; font-weight: 700; padding: 4px 8px; border-radius: 4px; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 8px;">
+                                                        {{ summary.sector }}
+                                                    </span>
+                                                    <p style="margin: 8px 0 0 0; color: #334155; font-size: 14px; line-height: 1.6; font-weight: 500;">
+                                                        {{ summary.headline }}
+                                                    </p>
+                                                    {% if summary.bullet_points %}
+                                                    <ul style="margin: 8px 0 0 0; padding-left: 20px; color: #475569; font-size: 13px; line-height: 1.6;">
+                                                        {% for point in summary.bullet_points %}
+                                                        <li>{{ point }}</li>
+                                                        {% endfor %}
+                                                    </ul>
+                                                    {% endif %}
+                                                </td>
+                                            </tr>
+                                        </table>
+                                        {% endfor %}
+                                    </td>
+                                </tr>
+                            </table>
 
-  <hr>
+                            <table border="0" cellpadding="0" cellspacing="0" width="100%">
+                                <tr>
+                                    <td style="padding-bottom: 16px; border-bottom: 2px solid #f1f5f9;">
+                                        <h2 style="margin: 0; color: #1e293b; font-size: 18px; font-weight: 700;">Günün Öne Çıkan Haberleri</h2>
+                                    </td>
+                                </tr>
+                                <tr>
+                                    <td style="padding-top: 16px;">
+                                        {% for article in articles %}
+                                        <table border="0" cellpadding="0" cellspacing="0" width="100%" style="margin-bottom: 28px; border-bottom: 1px solid #f1f5f9; padding-bottom: 24px;">
+                                            
+                                            {% if article.image_url %}
+                                            <tr>
+                                                <td style="padding-bottom: 14px;">
+                                                    <a href="{{ article.url }}" target="_blank" style="text-decoration: none;">
+                                                        <img src="{{ article.image_url }}" alt="{{ article.title }}" width="150" style="width: 100%; max-width: 100%; border-radius: 8px; object-fit: cover;" />
+                                                    </a>
+                                                </td>
+                                            </tr>
+                                            {% endif %}
 
-  {% for s in summaries %}
-  <div style="margin-bottom: 30px;">
-    <h2 style="color: #2E75B6;">{{ s.sector | upper }}</h2>
-    <p><strong>{{ s.headline }}</strong></p>
-    <ul>
-      {% for point in s.bullet_points %}
-      <li>{{ point }}</li>
-      {% endfor %}
-    </ul>
-  </div>
-  {% endfor %}
+                                            <tr>
+                                                <td>
+                                                    <table border="0" cellpadding="0" cellspacing="0" width="100%" style="margin-bottom: 8px;">
+                                                        <tr>
+                                                            <td valign="middle">
+                                                                <span style="color: #64748b; font-size: 12px; font-weight: 600; text-transform: uppercase;">
+                                                                    {{ article.sector if article.sector else 'Genel' }}
+                                                                </span>
+                                                            </td>
+                                                            {% if article.author %}
+                                                            <td align="right" valign="middle">
+                                                                <span style="color: #94a3b8; font-size: 12px;">{{ article.author }}</span>
+                                                            </td>
+                                                            {% endif %}
+                                                        </tr>
+                                                    </table>
+                                                    <h3 style="margin: 0 0 10px 0; font-size: 16px; font-weight: 700; line-height: 1.4;">
+                                                        <a href="{{ article.url }}" target="_blank" style="color: #1e293b; text-decoration: none;">
+                                                            {{ article.title }}
+                                                        </a>
+                                                    </h3>
+                                                </td>
+                                            </tr>
 
-  <hr>
-  <p style="color: #999; font-size: 12px;">
-    Bu bültene abone oldunuz. 
-    <a href="#">Aboneliği iptal et</a>
-  </p>
+                                            <tr>
+                                                <td style="color: #475569; font-size: 14px; line-height: 1.6; background-color: #fafafa; padding: 12px; border-radius: 6px; border: 1px solid #f1f5f9;">
+                                                    {{ article.summary }}
+                                                </td>
+                                            </tr>
+
+                                        </table>
+                                        {% endfor %}
+                                    </td>
+                                </tr>
+                            </table>
+
+                        </td>
+                    </tr>
+
+                    <tr>
+                        <td align="center" style="background-color: #f8fafc; padding: 24px; border-top: 1px solid #e2e8f0;">
+                            <p style="margin: 0 0 8px 0; color: #94a3b8; font-size: 12px; font-weight: 600; letter-spacing: 0.05em; text-transform: uppercase;">ito-news-group</p>
+                            <p style="margin: 0 0 16px 0; color: #64748b; font-size: 12px; line-height: 1.5;">
+                                Bu e-posta, sistemimize kayıtlı abonelere günlük otomatik bilgi sağlama amacıyla gönderilmiştir.
+                            </p>
+                            <table border="0" cellpadding="0" cellspacing="0">
+                                <tr>
+                                    <td>
+                                        <a href="#" style="color: #4f46e5; font-size: 12px; font-weight: 600; text-decoration: none; border-bottom: 1px solid #4f46e5;">Abonelikten Ayrıl</a>
+                                    </td>
+                                </tr>
+                            </table>
+                        </td>
+                    </tr>
+
+                </table>
+                
+            </td>
+        </tr>
+    </table>
 
 </body>
 </html>

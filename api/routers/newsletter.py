@@ -29,20 +29,49 @@ class SubscribeRequest(BaseModel):
 
 @router.post("/subscribe")
 def subscribe(req: SubscribeRequest):
-    """Yeni abone kaydı"""
+    """Yeni abone kaydı — varsa sadece aktifleştir, sektörleri koru"""
     client = get_supabase()
     try:
-        result = client.table("subscribers").insert({
-            "email": req.email,
-            "name": req.name,
-            "sectors": req.sectors,
-            "is_active": True
-        }).execute()
+        existing = client.table("subscribers").select("email").eq("email", req.email).maybe_single().execute()
+        if existing.data:
+            client.table("subscribers").update({"is_active": True}).eq("email", req.email).execute()
+        else:
+            client.table("subscribers").insert({
+                "email": req.email,
+                "name": req.name,
+                "sectors": req.sectors,
+                "is_active": True
+            }).execute()
         return {"message": "Abonelik başarılı", "email": req.email}
     except Exception as e:
-        if "unique" in str(e).lower():
-            raise HTTPException(status_code=409, detail="Bu e-posta zaten kayıtlı")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+class UpdateSubscriberSectorsRequest(BaseModel):
+    email: EmailStr
+    sectors: list[str]
+
+
+@router.put("/subscriber")
+def update_subscriber_sectors(req: UpdateSubscriberSectorsRequest):
+    """Abone sektör tercihlerini güncelle"""
+    client = get_supabase()
+    result = client.table("subscribers").update({
+        "sectors": req.sectors
+    }).eq("email", req.email).eq("is_active", True).execute()
+    if not result.data:
+        raise HTTPException(status_code=404, detail="Aktif abone bulunamadı")
+    return {"message": "Sektör tercihleri güncellendi", "email": req.email}
+
+
+@router.get("/subscriber/{email}")
+def get_subscriber(email: str):
+    """Abone bilgilerini getir"""
+    client = get_supabase()
+    result = client.table("subscribers").select("email, name, sectors, is_active").eq("email", email).maybe_single().execute()
+    if not result.data:
+        raise HTTPException(status_code=404, detail="Abone bulunamadı")
+    return result.data
 
 
 @router.delete("/unsubscribe/{email}")

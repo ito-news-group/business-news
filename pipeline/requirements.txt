@@ -1,6 +1,9 @@
 openai>=1.54.0
 supabase==2.5.0
 python-dotenv==1.0.1
+tiktoken>=0.7.0
+langchain-text-splitters>=0.3.0
+cohere>=5.5.0
 httpx
 jinja2
 resend
